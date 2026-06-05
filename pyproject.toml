@@ -4,4 +4,16 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "atomate2",
+    "dash-cytoscape>=1.0.2",
+    "emmet-core>=0.87.0rc12",
+    "jobflow>=0.3.1",
+    "jobflow-remote",
+    "python-fasthtml<0.13",
+    "starlette<0.40",
+]
+
+[tool.uv.sources]
+atomate2 = { git = "ssh://git@github.com/Luguza/atomate2.git", branch = "exchange-workflow-port-from-atomate1" }
+jobflow-remote = { git = "ssh://git@github.com/Matgenix/jobflow-remote.git", branch = "gp/minor_updates" }

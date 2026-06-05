@@ -1,0 +1,100 @@
+# jobflow-remote project config (tracked template).
+#
+# Setup (mirrors atomate1's my_launchpad.tracked.yaml -> my_launchpad.local.yaml):
+#   1. Copy this file to dft_pipeline2.local.yaml (gitignored) and replace
+#      <password> with the real jfr_user MongoDB password.
+#   2. Make jobflow-remote read it from its default projects folder by symlinking:
+#        mkdir -p ~/.jfremote
+#        ln -sf "$PWD/dft_pipeline2.local.yaml" ~/.jfremote/dft_pipeline2.yaml
+#      (Run from this directory. jobflow-remote globs *.yaml in ~/.jfremote only,
+#      so the repo folder itself is never scanned and the two variants never clash.)
+#   3. Verify: jf project check
+
+name: dft_pipeline2
+base_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2
+tmp_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/tmp
+log_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/log
+daemon_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/daemon
+log_level: info
+
+workers:
+  exchange_justus2:
+    type: local
+    scheduler_type: slurm
+    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work/exchange
+    resources:
+      partition: standard
+      account: bw16c005
+      nodes: 1
+      ntasks_per_node: 1
+      time: "02:00:00"
+    pre_run: |
+      module purge
+      module load chem/vasp/6.4.3
+      module load compiler/intel/2024.2.1
+      module load mpi/impi/2021.13.1
+      export PMG_VASP_PSP_DIR=/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.vasp_psp_compat
+      export PMG_DEFAULT_FUNCTIONAL=PBE
+      export ATOMATE2_VASP_CMD="vasp"
+      export ATOMATE2_VASP_GAMMA_CMD="vasp"
+      export OMP_NUM_THREADS=1
+      export MKL_NUM_THREADS=1
+      source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
+  
+  magnetism_justus2:
+    type: local
+    scheduler_type: slurm
+    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work/magnetism
+    resources:
+      partition: standard
+      account: bw16c005
+      nodes: 1
+      ntasks_per_node: 24
+      time: "03:00:00"
+    pre_run: |
+      module purge
+      module load chem/vasp/6.4.3
+      module load compiler/intel/2024.2.1
+      module load mpi/impi/2021.13.1
+      export PMG_VASP_PSP_DIR=/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.vasp_psp_compat
+      export PMG_DEFAULT_FUNCTIONAL=PBE
+      export ATOMATE2_VASP_CMD="vasp"
+      export ATOMATE2_VASP_GAMMA_CMD="vasp"
+      export OMP_NUM_THREADS=1
+      export MKL_NUM_THREADS=1
+      source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
+
+queue:
+  store:
+    type: MongoStore
+    host: 193.196.37.200
+    port: 49170
+    database: dft_pipeline2
+    username: jfr_user
+    password: <password>
+    auth_source: dft_pipeline2
+    collection_name: jfr_jobs
+  flows_collection: jfr_flows
+  auxiliary_collection: jfr_auxiliary
+  batches_collection: jfr_batches
+
+jobstore:
+  docs_store:
+    type: MongoStore
+    host: 193.196.37.200
+    port: 49170
+    database: dft_pipeline2
+    username: jfr_user
+    password: <password>
+    auth_source: dft_pipeline2
+    collection_name: jfr_outputs
+  additional_stores:
+    data:
+      type: GridFSStore
+      host: 193.196.37.200
+      port: 49170
+      database: dft_pipeline2
+      username: jfr_user
+      password: <password>
+      auth_source: dft_pipeline2
+      collection_name: jfr_outputs_blobs

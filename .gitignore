@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+
+*.local.*
+
+# FastHTML session signing key (secret — do not commit)
+.sesskey
+jfr_work/
