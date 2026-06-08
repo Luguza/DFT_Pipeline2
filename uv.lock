@@ -125,8 +125,8 @@ wheels = [
 
 [[package]]
 name = "atomate2"
-version = "0.0.1.post3237+g8142c33f"
-source = { git = "ssh://git@github.com/Luguza/atomate2.git?branch=exchange-workflow-port-from-atomate1#8142c33f5925ff84a9540626cce4afc1febd2be3" }
+version = "0.0.1.post3239+gdf449fe0"
+source = { git = "ssh://git@github.com/Luguza/atomate2.git?branch=exchange-workflow-port-from-atomate1#df449fe03812ea1ad0125ea812adecfd699dbce2" }
 dependencies = [
     { name = "click" },
     { name = "custodian" },
@@ -1043,8 +1043,8 @@ wheels = [
 
 [[package]]
 name = "jobflow-remote"
-version = "1.0.0.post41+g6a2fd68"
-source = { git = "ssh://git@github.com/Matgenix/jobflow-remote.git?branch=gp%2Fminor_updates#6a2fd68603b25b1cd235b23b01c999f13b55ea12" }
+version = "1.0.0.post50+gb00bb26"
+source = { git = "ssh://git@github.com/Matgenix/jobflow-remote.git?branch=gp%2Fminor_updates#b00bb269166164fcd8ed128f92a8048a7e33f6d3" }
 dependencies = [
     { name = "fabric" },
     { name = "flufl-lock" },

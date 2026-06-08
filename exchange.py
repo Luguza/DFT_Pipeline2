@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from jobflow import run_locally
+from jobflow_remote import submit_flow
 from jobflow_remote import JobController
 from jobflow_remote.jobs.state import JobState
 
 from atomate2.common.flows.exchange import ExchangeMaker
+from monty.json import MontyDecoder
 
 PROJECT = "dft_pipeline2"
 
@@ -19,14 +20,16 @@ def latest_ordering_doc():
             "Run magnetism.py and let it finish on the cluster first."
         )
     latest = max(infos, key=lambda i: i.updated_on)
-    return jc.get_job_output(job_id=latest.uuid, job_index=latest.index, load=True)
+    raw = jc.get_job_output(job_id=latest.uuid, job_index=latest.index, load=True)
+    return MontyDecoder().process_decoded(raw)
 
 
 def calc_exchange(ordering_doc):
     """Build the exchange flow from a completed magnetic-orderings document."""
-    return ExchangeMaker(run_vampire=False).make_from_ordering_doc(ordering_doc)
+    return ExchangeMaker(run_vampire=True).make_from_ordering_doc(ordering_doc)
 
 
 if __name__ == "__main__":
-    flow = calc_exchange(latest_ordering_doc())
-    run_locally(flow)
+    doc = latest_ordering_doc()
+    flow = calc_exchange(doc)
+    submit_flow(flow, worker="exchange_justus2", project=PROJECT)
