@@ -1,0 +1,361 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+% Inline code shorthand: monospaced, but with line-break opportunities after
+% underscores so long identifiers/paths don't overflow the text block.
+\newcommand{\code}[1]{\texttt{\def\_{\textunderscore\allowbreak}#1}}
+
+% Let TeX stretch the last line a little rather than overflowing the margin.
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  language=Python,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{gray},
+  stringstyle=\color{green!40!black},
+  showstringspaces=false,
+  columns=fullflexible,
+}
+
+% Plain (non-language) listing style for the ASCII flow diagram
+\lstdefinestyle{plain}{language={},keywordstyle=\ttfamily,basicstyle=\ttfamily\footnotesize,breaklines=false}
+
+\title{Energy units through pymatgen's \texttt{HeisenbergMapper}}
+\author{Luca Frey}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\noindent
+\textbf{Scope.} This note traces what happens to the energy --- and its units ---
+from the moment we hand structures and \textbf{total energies} to pymatgen's
+\code{HeisenbergMapper}, through construction of the Heisenberg design matrix, the
+linear fit itself, and finally into the \code{HeisenbergModel} object that gets
+written out. The upstream glue (pulling structures/energies out of the
+magnetic-orderings document and reconstructing total energies) is deliberately
+omitted: we start where the class's public contract starts, i.e.\ assuming we
+already have
+
+\begin{itemize}
+  \item a list of magnetic structures (each with a \code{magmom} site property), and
+  \item a list of \textbf{total energies} $E_k^{\mathrm{tot}}$ (eV) --- the energy of
+        the entire supercell of ordering $k$, summed over all of its atoms.
+\end{itemize}
+
+\noindent
+All file/line references are to
+\code{.venv/\allowbreak lib/\allowbreak python3.12/\allowbreak site-packages/\allowbreak pymatgen/\allowbreak analysis/\allowbreak magnetism/\allowbreak heisenberg.py}.
+
+\section*{Notation (fixed throughout)}
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}l X l@{}}
+\toprule
+Symbol & Meaning & Unit \\
+\midrule
+$E_k^{\mathrm{tot}}$ & total DFT energy of ordering $k$ (whole supercell) & eV \\
+$N_k^{\mathrm{mag}}$ & number of \textbf{magnetic ions} in ordering $k$ & --- (count) \\
+$\varepsilon_k$ & per-mag-ion energy, $\varepsilon_k = E_k^{\mathrm{tot}}/N_k^{\mathrm{mag}}$ & eV / mag ion \\
+$s_i$ & local magnetic moment (\code{magmom}) on magnetic ion $i$, used as a bare number & value in $\mu_B$ \\
+$J_{ab}$ & exchange constant for neighbour class $ab$ (nn/nnn/nnnn) & see Step~3 \\
+$E_0$ & spin-independent (nonmagnetic) reference energy & eV / mag ion \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\noindent
+The Heisenberg energy model the code assumes (collinear; the moments enter as
+dimensionless scalars, i.e.\ their bare values in $\mu_B$, so $J$ carries the energy
+units):
+\begin{equation}
+E^{\mathrm{tot}} = E_0 - \sum_{\langle i,j\rangle} J_{ij}\, s_i\, s_j ,
+\end{equation}
+where the sum runs over unique neighbour bonds $\langle i,j\rangle$.
+
+\paragraph{Important convention.}
+Nowhere in this pipeline is energy normalised by the \emph{total atom count}. The
+only normalisation that ever happens is division by the number of \textbf{magnetic
+ions}, $N_k^{\mathrm{mag}}$. So the natural energy unit inside the mapper is
+\textbf{eV / mag ion}, and the fitted couplings come out \textbf{per mag ion} ---
+\emph{not} per (total) atom --- despite what the source docstrings call
+``meV/atom''.
+
+\section*{Step 1 --- Ingestion and normalisation: total energy $\to$ eV / mag ion}
+
+\code{HeisenbergMapper.\_\_init\_\_} immediately routes the inputs through
+\code{HeisenbergScreener}, whose \code{\_do\_cleanup} does the unit-relevant work
+(\code{heisenberg.py:696}).
+
+\begin{enumerate}
+  \item \textbf{Strip to the magnetic sublattice} (\code{heisenberg.py:717--722}).
+        Each structure is reduced to magnetic ions only via
+        \code{get\_structure\_with\_only\_magnetic\_atoms}. After this,
+        \code{len(s)} for a structure equals $N_k^{\mathrm{mag}}$ --- the
+        magnetic-ion count, not the total-atom count.
+
+  \item \textbf{Normalise the energy} (\code{heisenberg.py:725}):
+\begin{lstlisting}
+energies = [e / len(s) for (e, s) in zip(energies, ordered_structures)]
+\end{lstlisting}
+        This is the single, decisive unit conversion:
+        \begin{equation}
+          \varepsilon_k = \frac{E_k^{\mathrm{tot}}}{N_k^{\mathrm{mag}}}
+          \qquad [\text{eV}] \;\longrightarrow\; [\text{eV} / \text{mag ion}] .
+        \end{equation}
+        From here on, every energy the mapper touches is in \textbf{eV / mag ion}.
+
+  \item \textbf{De-duplicate and sort} (\code{heisenberg.py:732--754}). Degenerate
+        orderings are dropped using a tolerance of $10^{-6}$ eV / mag ion, then
+        structures and energies are sorted ascending in $\varepsilon_k$.
+\end{enumerate}
+
+The cleaned, per-mag-ion energies are stored on the mapper as \code{self.energies}
+(\code{heisenberg.py:83}). The original total energies are not retained.
+
+\section*{Step 2 --- Building the Heisenberg design matrix (\code{\_get\_exchange\_df})}
+
+\code{\_get\_exchange\_df} (\code{heisenberg.py:229}) builds one linear equation per
+ordering. Each row has an \code{E} column (the left-hand side), an \code{E0} column
+(coefficient of the reference energy), and one column per neighbour class $ab$ (the
+coefficient of $J_{ab}$).
+
+\paragraph{The \code{E} column (LHS).} \code{heisenberg.py:330}:
+\begin{lstlisting}
+ex_row.loc[sgraph_index, "E"] = self.energies[e_index]
+\end{lstlisting}
+so the LHS of row $k$ is $\varepsilon_k$, in \textbf{eV / mag ion}.
+
+\paragraph{The coupling columns (design coefficients).} For ordering $k$, the code
+loops over every magnetic ion $i$ and every neighbour $j$, accumulating
+$-s_i s_j$ into the column for that bond class (\code{heisenberg.py:318--321}).
+Because the node loop visits each physical bond twice (once from each endpoint), the
+raw column equals $-2\sum s_i s_j$; the explicit $\tfrac12$ factor at
+\code{heisenberg.py:338} (\code{ex\_mat[j\_columns] /= 2}) removes the double-count.
+The resulting coefficient is
+\begin{equation}
+  C_{ab,k} = -\!\!\sum_{\langle i,j\rangle \,\in\, ab \text{ in cell } k}\!\! s_i\, s_j
+  \qquad (\text{a pure number}) .
+\end{equation}
+This coefficient is \textbf{extensive}: it is a sum over all bonds of class $ab$ in
+the supercell, so it scales with $N_k^{\mathrm{mag}}$.
+
+\paragraph{The \code{E0} column.} Set to $1$ for every row
+(\code{heisenberg.py:339}) --- a dimensionless constant carrying the
+spin-independent reference energy.
+
+So row $k$ encodes the equation
+\begin{equation}
+  \varepsilon_k = E_0\cdot 1 + \sum_{ab} J_{ab}\, C_{ab,k} ,
+\end{equation}
+$J_{ab}$ carries no unit of its own a priori; its dimension is \emph{fixed} by this
+balance. Because $C_{ab,k}$ is a pure number, the $J_{ab}$ term must already be in
+eV / mag ion:
+\begin{equation}
+  \underbrace{\Big[\tfrac{\text{eV}}{\text{mag ion}}\Big]}_{\varepsilon_k}
+  = \underbrace{\Big[\tfrac{\text{eV}}{\text{mag ion}}\Big]}_{E_0}
+  + [J_{ab}]\cdot\underbrace{(\text{number})}_{C_{ab,k}}
+  \;\;\Longrightarrow\;\;
+  [J_{ab}] = \frac{\text{eV}}{\text{mag ion}} .
+\end{equation}
+
+Finally the matrix is made square (\code{heisenberg.py:342--349}): all-zero columns
+are dropped\footnote{\textbf{The singularity guard (\code{heisenberg.py:341--345})
+is broken, in a pandas-version-dependent way.} It does anything only when a coupling
+column is all-zero --- a degenerate case where some interaction class has
+$\sum s_i s_j = 0$ in \emph{every} retained ordering --- so ordinary multi-$J$ fits
+never enter it. When it does fire there are two faults. (i)~It removes only the
+\emph{first} all-zero column, because \code{c = ex\_mat.columns[zeros.index(True)]}
+uses \code{list.index(True)} (first match); so under the pandas the code was written
+for ($\le 2$.x), two or more all-zero columns leave $H$ singular at
+\code{np.linalg.inv(H)} (\code{heisenberg.py:377}). (ii)~On the \textbf{pandas 3.0.3}
+pinned in this project the call \code{ex\_mat.drop(columns=[c], axis=1)} passes both
+\code{columns} and \code{axis}, which now raises
+\code{ValueError: Cannot specify both 'axis' and 'index'/'columns'} (verified) --- so
+it deletes \emph{nothing} and the fit aborts on the very first all-zero column. The
+commented-out \code{ex\_mat.drop(ex\_mat.tail(len\_zeros).index)} on the next line
+hints that removing all of them was the intent.} and the rows are truncated so the
+number of equations equals the number of unknowns ($E_0$ plus the retained $J_{ab}$).
+
+\section*{Step 3 --- The fit itself (\code{get\_exchange})}
+
+\code{get\_exchange} (\code{heisenberg.py:353}) solves the square linear system
+assembled above. Writing the unknown vector
+$x = (E_0, J_{\mathrm{nn}}, J_{\mathrm{nnn}}, \dots)^{\mathsf T}$, the design matrix
+$H$ (the \code{E0} + coupling columns), and the right-hand side
+$\boldsymbol{\varepsilon} = (\varepsilon_1, \dots, \varepsilon_n)^{\mathsf T}$:
+\begin{equation}
+  H\, x = \boldsymbol{\varepsilon} .
+\end{equation}
+Solved by inversion (\code{heisenberg.py:376--378}):
+\begin{lstlisting}
+H_inv = np.linalg.inv(H)
+j_ij  = H_inv @ E      # E here is the eps column, in eV / mag ion
+\end{lstlisting}
+
+\paragraph{Units coming out of the solve.} $\boldsymbol{\varepsilon}$ is in
+eV / mag ion and the coupling columns $C_{ab,k}$ are pure numbers, so the raw solution
+components have units
+\begin{equation}
+  [E_0] = \frac{\text{eV}}{\text{mag ion}},
+  \qquad
+  [J_{ab}] = \frac{\text{eV}}{\text{mag ion}} ,
+\end{equation}
+i.e.\ each $J_{ab}$ is an exchange energy expressed \textbf{per magnetic ion}
+(because the LHS was per mag ion while the design coefficients were left extensive
+--- see the consistency note in Step~6).
+
+\paragraph{Conversion to meV.} \code{heisenberg.py:381}:
+\begin{lstlisting}
+j_ij[1:] *= 1000      # eV -> meV ; the [0] entry (E_0) is left in eV
+\end{lstlisting}
+so the reported couplings are
+\begin{equation}
+  J_{ab} \;\text{in}\; \frac{\text{meV}}{\text{mag ion}}
+  \qquad (\text{source labels this ``meV/atom''}).
+\end{equation}
+
+\paragraph{Degenerate case (fewer than 3 couplings).} If the symmetry analysis
+yields fewer than three independent neighbour classes, the matrix route is skipped
+(\code{heisenberg.py:367--373}) and a single averaged $\langle J\rangle$ from
+Step~3a is returned instead.
+
+\subsection*{Step 3a --- The $\langle J\rangle$ shortcut (\code{estimate\_exchange})}
+
+\code{estimate\_exchange} (\code{heisenberg.py:454}) bypasses the matrix and
+estimates one average coupling from the lowest FM and AFM orderings, using the same
+per-mag-ion energies. With $\varepsilon_{\mathrm{fm}}$, $\varepsilon_{\mathrm{afm}}$
+taken from \code{self.energies} (\code{heisenberg.py:468}):
+\begin{align}
+  \Delta\varepsilon &= \varepsilon_{\mathrm{afm}} - \varepsilon_{\mathrm{fm}}
+    & & [\text{eV} / \text{mag ion}] \\
+  m_{\mathrm{avg}} &= \big\langle |s_i| \big\rangle_{\mathrm{FM}}
+    & & (\text{a pure number, in } \mu_B) \\
+  \langle J\rangle &= \Delta\varepsilon \,/\, m_{\mathrm{avg}}^2
+    & & [\text{eV} / \text{mag ion}] \\
+  \langle J\rangle &\mathrel{*}= 1000
+    & & [\text{meV} / \text{mag ion}]
+    \quad (\code{heisenberg.py:485--487})
+\end{align}
+So $\langle J\rangle$ (stored later as \code{javg}) is, like the matrix couplings,
+an exchange energy \textbf{per magnetic ion}, in meV.
+
+\section*{Step 4 --- What the fitted \code{HeisenbergModel} carries
+(\code{get\_heisenberg\_model})}
+
+\code{get\_heisenberg\_model} (\code{heisenberg.py:624}) packages the results into
+the MSONable \code{HeisenbergModel} that gets written out. The energy-bearing fields
+and their units:
+
+\begin{table}[h]
+\centering
+\begin{tabularx}{\textwidth}{@{}p{0.34\textwidth} p{0.20\textwidth} X@{}}
+\toprule
+Field (in the written model) & Source & Unit \\
+\midrule
+\code{energies} (\code{hm\_energies}, \code{:634}) & \code{self.energies} &
+  \textbf{eV / mag ion} --- \emph{not} total energies, \emph{not} the original inputs \\
+\code{ex\_mat} (\code{hm\_em}, \code{:644}) & design matrix (JSON) &
+  \code{E} column eV / mag ion; coupling columns are pure numbers \\
+\code{ex\_params} (\code{hm\_ep}, \code{:645}) & \code{get\_exchange()} &
+  \textbf{meV / mag ion} per coupling (or a single $\langle J\rangle$) \\
+\code{javg} (\code{hm\_javg}, \code{:646}) & \code{estimate\_exchange()} &
+  \textbf{meV / mag ion} \\
+\code{igraph} (\code{hm\_igraph}, \code{:647}) & interaction graph &
+  edge weights $J_{\mathrm{exc}}$ in \textbf{meV} (per mag ion); label string \code{"meV"} \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+The structures stored in the model are the \textbf{magnetic-only} sublattice cells
+produced during cleanup, not the original full cells.
+
+\section*{Step 5 --- Units summary (end to end)}
+
+\begin{lstlisting}[style=plain]
+INPUT                 Step 1                   Steps 2-3            OUTPUT
+E_k^tot               eps_k = E_k^tot/N_k^mag  fit  H x = eps      ex_params, javg
+[eV, whole cell] ---> [eV / mag ion]      ---> J_ab x1000    --->  [meV / mag ion]
+                      (heisenberg.py:725)      (heisenberg.py:381) model.energies = eps_k
+                                                                   [eV / mag ion]
+\end{lstlisting}
+
+The whole mapper lives in \textbf{two} energy units only: \textbf{eV / mag ion} (the
+cleaned energies and the matrix LHS) and \textbf{meV / mag ion} (the reported
+couplings). Total atom counts never enter; the only normalisation is by
+$N_k^{\mathrm{mag}}$.
+
+\section*{Step 6 --- Consistency caveat: the supercells must match in size}
+
+The fit divides the \textbf{left-hand side} by $N_k^{\mathrm{mag}}$ (Step~1) but
+leaves the \textbf{design coefficients} $C_{ab,k}$ extensive (summed over all bonds,
+Step~2). Putting those two facts together, the system the code actually solves is
+\begin{equation}
+  \frac{E_k^{\mathrm{tot}}}{N_k^{\mathrm{mag}}}
+  = E_0 + \sum_{ab} J_{ab}\, C_{ab,k} .
+\end{equation}
+Multiplying back by $N_k^{\mathrm{mag}}$ and comparing to the physical total-energy
+model
+\begin{equation}
+  E_k^{\mathrm{tot}} = E_0^{\mathrm{tot}} + \sum_{ab} J_{ab}^{\mathrm{phys}}\, C_{ab,k}
+\end{equation}
+shows the two agree, for \textbf{all} rows simultaneously, only if
+$N_k^{\mathrm{mag}}$ is the \textbf{same for every ordering}. In that case the solved
+couplings equal the physical ones divided by that common magnetic-ion count --- which
+is exactly why they are ``per mag ion.''
+
+\paragraph{It is the \emph{absolute} supercell size that matters, not the primitive
+cell.} Write the supercell of ordering $k$ as $n_k$ primitive cells, with $\nu$
+magnetic ions per primitive cell ($\nu$ is a constant of the material). Then
+$N_k^{\mathrm{mag}} = \nu\, n_k$, and because $C_{ab,k}$ is a raw sum over bonds it
+scales with the supercell, $C_{ab,k} = n_k\, c_{ab,k}$, where $c_{ab,k}$ is the
+per-primitive-cell coefficient. The fitted row then reads
+\begin{equation}
+  \underbrace{\varepsilon_k}_{\text{intensive }(\propto\, n_k^0)}
+  = E_0 + \sum_{ab} J_{ab}\,\underbrace{n_k\, c_{ab,k}}_{C_{ab,k}\,\propto\, n_k} .
+\end{equation}
+The left side is intensive (energy per magnetic ion, independent of $n_k$), yet every
+exchange term on the right carries an explicit $n_k$. A single
+$(E_0, \{J_{ab}\})$ can satisfy all rows only if $n_k$ --- the absolute supercell
+size, hence $N_k^{\mathrm{mag}}$ --- is the same throughout. The per-primitive-cell
+count $\nu$ is constant by construction and does \emph{not} relax this.
+
+\paragraph{The reference term is the exception.} The nonmagnetic energy is genuinely
+extensive, $E_{0,k}^{\mathrm{tot}} = n_k\, e_0$, so
+$E_{0,k}^{\mathrm{tot}}/N_k^{\mathrm{mag}} = e_0/\nu$ is intensive and fits a single
+$E_0$ for \emph{any} $n_k$ (its column is simply $1$). So the ``$E^{\mathrm{tot}}$ is
+an integer multiple of the primitive-cell energy'' intuition rescues the reference
+term --- but not the exchange terms: for a non-FM ordering the magnetic period is the
+larger magnetic cell, the exchange contribution differs per ordering, and that
+ordering-dependent piece is exactly the size-sensitive signal being fit.
+
+\paragraph{What would remove the restriction.} If the code also divided the design
+coefficients by $N_k^{\mathrm{mag}}$ (using $c_{ab,k}/\nu$, a per-mag-ion
+coefficient), the whole row would be intensive and the solve would return
+$J_{ab}^{\mathrm{solved}} = J_{ab}^{\mathrm{phys}}$ for \emph{any} mix of supercell
+sizes. The limitation is precisely the asymmetry: the energy (LHS) is normalised to
+per mag ion, while the design matrix (RHS) is left extensive.
+
+\paragraph{In practice.} For orderings enumerated from a single parent cell --- the
+usual magnetic-orderings workflow --- all supercells share one size, the condition
+holds, and the couplings come out uniformly as $J^{\mathrm{phys}}/N^{\mathrm{mag}}$
+(the ``per mag ion'' of the reported units). It is only a hazard if supercells of
+different sizes are mixed into a single fit.
+
+\end{document}
