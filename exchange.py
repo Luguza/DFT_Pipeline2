@@ -31,5 +31,6 @@ def calc_exchange(ordering_doc):
 
 if __name__ == "__main__":
     doc = latest_ordering_doc()
-    flow = calc_exchange(doc)
-    submit_flow(flow, worker="exchange_justus2", project=PROJECT)
+    # flow = calc_exchange(doc)
+    # submit_flow(flow, worker="exchange_justus2", project=PROJECT)
+    print("latest ordering doc:", doc)

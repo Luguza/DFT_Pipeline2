@@ -9,42 +9,18 @@
 #      (Run from this directory. jobflow-remote globs *.yaml in ~/.jfremote only,
 #      so the repo folder itself is never scanned and the two variants never clash.)
 #   3. Verify: jf project check
-
 name: dft_pipeline2
-base_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2
-tmp_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/tmp
-log_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/log
-daemon_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.jfremote/dft_pipeline2/daemon
+base_dir: /home/ka/ka_iti/ka_qa7606/.jfremote/dft_pipeline2/
+tmp_dir: /home/ka/ka_iti/ka_qa7606/.jfremote/dft_pipeline2//tmp
+log_dir: /home/ka/ka_iti/ka_qa7606/.jfremote/dft_pipeline2/log
+daemon_dir: /home/ka/ka_iti/ka_qa7606/.jfremote/dft_pipeline2/daemon
 log_level: info
 
 workers:
-  exchange_justus2:
-    type: local
-    scheduler_type: slurm
-    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work/exchange
-    resources:
-      partition: standard
-      account: bw16c005
-      nodes: 1
-      ntasks_per_node: 1
-      time: "02:00:00"
-    pre_run: |
-      module purge
-      module load chem/vasp/6.4.3
-      module load compiler/intel/2024.2.1
-      module load mpi/impi/2021.13.1
-      export PMG_VASP_PSP_DIR=/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.vasp_psp_compat
-      export PMG_DEFAULT_FUNCTIONAL=PBE
-      export ATOMATE2_VASP_CMD="vasp"
-      export ATOMATE2_VASP_GAMMA_CMD="vasp"
-      export OMP_NUM_THREADS=1
-      export MKL_NUM_THREADS=1
-      source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
-  
   magnetism_justus2:
     type: local
     scheduler_type: slurm
-    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work/magnetism
+    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work
     resources:
       partition: standard
       account: bw16c005
@@ -63,6 +39,30 @@ workers:
       export OMP_NUM_THREADS=1
       export MKL_NUM_THREADS=1
       source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
+
+  exchange_justus2:
+    type: local
+    scheduler_type: slurm
+    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work
+    resources:
+      partition: standard
+      account: bw16c005
+      nodes: 1
+      ntasks_per_node: 1
+      time: "01:00:00"
+    pre_run: |
+      module purge
+      module load chem/vasp/6.4.3
+      module load compiler/intel/2024.2.1
+      module load mpi/impi/2021.13.1
+      export PMG_VASP_PSP_DIR=/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.vasp_psp_compat
+      export PMG_DEFAULT_FUNCTIONAL=PBE
+      export ATOMATE2_VASP_CMD="vasp"
+      export ATOMATE2_VASP_GAMMA_CMD="vasp"
+      export OMP_NUM_THREADS=1
+      export MKL_NUM_THREADS=1
+      source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
+  
 
 queue:
   store:
