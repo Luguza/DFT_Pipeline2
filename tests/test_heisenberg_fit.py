@@ -21,7 +21,7 @@ Strategy
 Recovery is exact only when every ordering shares ONE common supercell, so that
 N_mag is identical across orderings (the standard enumeration workflow). That is
 the asserted test. A second block *demonstrates* the documented failure when
-minimal cells of different sizes are mixed (Sec. 9 of the note); it is printed,
+minimal cells of different sizes are mixed (Sec. 8 of the note); it is printed,
 not asserted.
 
 Run:  .venv/bin/python test_heisenberg_fit.py
@@ -154,7 +154,7 @@ def main() -> int:
     ex_mixed = run({"FM": (1, 1), "Stripe": (1, 2), "Neel": (2, 2)})
     print("  fitted :", {k: round(v, 6) for k, v in ex_mixed.items()})
     print("  NOTE: not expected to match J_phys/N -- mixing supercell sizes")
-    print("        breaks the fit (heisenberg_energy_units.tex, Sec. 9):")
+    print("        breaks the fit (heisenberg_energy_units.tex, Sec. 8):")
     print("        unique_site_ids is built only from the first structure, so")
     print("        bonds touching higher site indices are silently dropped.")
 

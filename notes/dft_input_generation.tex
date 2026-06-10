@@ -1,0 +1,313 @@
+\documentclass[11pt]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[hidelinks]{hyperref}
+
+% Inline code shorthand: monospaced, with break opportunities after underscores
+% so long identifiers/paths do not overflow the text block.
+\newcommand{\code}[1]{\texttt{\def\_{\textunderscore\allowbreak}#1}}
+
+% Let TeX stretch the last line a little rather than overflowing the margin.
+\setlength{\emergencystretch}{3em}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  language=Python,
+  keywordstyle=\color{blue!60!black},
+  commentstyle=\color{gray},
+  stringstyle=\color{green!40!black},
+  showstringspaces=false,
+  columns=fullflexible,
+}
+
+\lstdefinestyle{plain}{language={},keywordstyle=\ttfamily,%
+  basicstyle=\ttfamily\footnotesize,breaklines=false}
+\lstdefinestyle{incar}{language={},keywordstyle=\ttfamily,%
+  basicstyle=\ttfamily\small,breaklines=true}
+
+\title{How the DFT Inputs Are Generated\\[2pt]
+\large The magnetic-orderings pipeline (\code{atomate2} + \code{jobflow-remote})}
+\author{Luca Frey}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Scope}
+
+This note describes, end to end, how the VASP input files (\code{INCAR},
+\code{KPOINTS}, \code{POSCAR}, \code{POTCAR}) for the magnetism pipeline are
+produced from a single input \code{Structure}. Nothing in the repository writes
+these files by hand: the pipeline is a thin driver around \code{atomate2}'s
+\code{MagneticOrderingsMaker}, which in turn delegates to \code{atomate2}'s VASP
+\emph{input-set generators} and, below those, to \code{pymatgen}'s
+\code{VaspInputSet}. The sections below follow that delegation chain.
+
+All concrete values quoted here were resolved from the installed packages for the
+minimal example in \code{magnetism.py}: rock-salt MnO,
+\code{Structure(Lattice.cubic(4.445), ["Mn", "O"], \dots)}.
+
+\section{High-level flow}
+
+The user-facing entry point is \code{magnetism.py}:
+
+\begin{lstlisting}
+flow = MagneticOrderingsMaker().make(structure)
+submit_flow(flow, worker="magnetism_justus2", project="dft_pipeline2")
+\end{lstlisting}
+
+\code{MagneticOrderingsMaker.make()} builds a three-job \code{Flow}:
+
+\begin{enumerate}
+  \item \textbf{\code{enumerate orderings}} --- enumerate candidate collinear
+        magnetic orderings of the input structure.
+  \item \textbf{\code{run orderings}} --- for each ordering, run an (optional)
+        relaxation followed by a static calculation. This job replaces itself
+        with the actual VASP sub-jobs.
+  \item \textbf{\code{postprocess orderings}} --- collect the total energies,
+        identify the ground-state ordering, and build a
+        \code{MagneticOrderingsDocument}.
+\end{enumerate}
+
+Only step~2 generates DFT inputs. The downstream \code{exchange.py} flow
+(\code{ExchangeMaker}) consumes the \emph{energies} produced here to fit a
+Heisenberg model and run Vampire; it does \emph{not} launch new VASP runs, so it
+is out of scope for this note.
+
+\begin{center}
+\begin{lstlisting}[style=plain]
+Structure
+   |
+   v  enumerate_magnetic_orderings()          [pymatgen MagneticStructureEnumerator]
+ordered structures + origins (fm / afm / ...)
+   |
+   v  run_ordering_calculations()             [one branch per ordering]
+   |
+   +--> RelaxMaker.make(struct)   -- RelaxSetGenerator  --> VASP relax
+   |        | CONTCAR (prev_dir)
+   |        v
+   +--> StaticMaker.make(struct)  -- StaticSetGenerator --> VASP static  --> energy
+\end{lstlisting}
+\end{center}
+
+\section{Step 1: Enumerating magnetic orderings}
+
+\code{enumerate\_magnetic\_orderings} (in \code{atomate2/common/jobs/magnetism.py})
+is a thin wrapper around \code{pymatgen}'s \code{MagneticStructureEnumerator}.
+With the defaults set by \code{MagneticOrderingsMaker} it is called with
+
+\begin{itemize}
+  \item \code{strategies = ("ferromagnetic", "antiferromagnetic")},
+  \item \code{automatic = True} (let pymatgen add sensible extra strategies),
+  \item \code{truncate\_by\_symmetry = True} (drop very low-symmetry, physically
+        implausible orderings),
+  \item \code{default\_magmoms = None} (use pymatgen's
+        \code{default\_magmoms.yaml}; high-spin initial moments).
+\end{itemize}
+
+The enumerator returns a list of ordered \code{Structure} objects together with
+an \emph{origin} tag for each (\code{"fm"}, \code{"afm"}, \dots). Crucially, each
+returned structure carries a per-site initial magnetic moment (the collinear
+$\pm$ pattern that defines the ordering). For MnO this yields \textbf{9
+orderings} (1 FM + 8 AFM). These per-site moments are what later become the
+\code{MAGMOM} tag --- the magnetic ordering is encoded in the input structure,
+not in any INCAR setting written by the pipeline.
+
+\section{Step 2: One relax + one static per ordering}
+
+\code{run\_ordering\_calculations} loops over the enumerated orderings and, for
+each, emits up to two VASP jobs (see \code{atomate2/common/jobs/magnetism.py}):
+
+\begin{enumerate}
+  \item \code{relax\_maker.make(struct)} --- a structural relaxation of the
+        ordered cell. The default \code{relax\_maker} is \code{RelaxMaker()}.
+  \item \code{static\_maker.make(relaxed\_structure, prev\_dir=relax.dir\_name)}
+        --- a high-quality static energy on the relaxed geometry. The static job
+        copies the relaxation outputs (\code{CONTCAR}$\to$\code{POSCAR}, charge
+        density, etc.) via \code{copy\_vasp\_outputs} before writing its own
+        inputs.
+\end{enumerate}
+
+The makers come from \code{MagneticOrderingsMaker}'s defaults:
+
+\begin{lstlisting}
+static_maker = StaticMaker(
+    input_set_generator=StaticSetGenerator(user_incar_settings={"EDIFF": 1e-7})
+)
+relax_maker  = RelaxMaker()   # default RelaxSetGenerator
+\end{lstlisting}
+
+\noindent So the only project-specific deviation from the \code{atomate2} stock
+settings is the tightened \code{EDIFF}~$=10^{-7}$ on the static step (the
+energies feed a Heisenberg fit, hence the demand for well-converged total
+energies).
+
+Each \code{*Maker} is a \code{BaseVaspMaker}. Its \code{make()} method performs
+the same four actions for every job
+(\code{atomate2/vasp/jobs/base.py}): (i) optionally copy previous outputs,
+(ii) \code{write\_vasp\_input\_set(structure, input\_set\_generator)},
+(iii) \code{run\_vasp}, (iv) parse the directory into a \code{TaskDoc}. Step~(ii)
+is where the input files are written; it calls
+\code{input\_set\_generator.get\_input\_set(structure).write\_input(\dots)}.
+
+\section{Step 3: Assembling one VASP input set}
+
+All of \code{INCAR}, \code{KPOINTS}, \code{POSCAR} and \code{POTCAR} come out of a
+single \code{VaspInputGenerator} (subclass of \code{pymatgen}'s
+\code{VaspInputSet}). The generator is built from three layers, in increasing
+priority.
+
+\subsection{Layer 1 --- the \texttt{atomate2} base config}
+
+The base configuration is defined once in \code{atomate2/vasp/sets/base.py}. It
+starts from \code{pymatgen}'s \code{MPScanRelaxSet} config dictionary and then
+overrides it back to a \emph{GGA{+}U} set:
+
+\begin{itemize}
+  \item \code{METAGGA} removed and \code{GGA = "PS"} --- i.e.\ the
+        exchange--correlation functional is \textbf{PBEsol}, not the r$^2$SCAN
+        meta-GGA of the parent set. \code{KSPACING} is also removed (a
+        \code{KPOINTS} file is used instead).
+  \item \code{ALGO = "Fast"}, \code{LREAL = False}.
+  \item all \code{LDAU*} keys are inherited from \code{MPRelaxSet}: Hubbard $U$ is
+        \textbf{on} (\code{LDAU = True}, \code{LDAUTYPE = 2}) with the
+        anion-aware per-element $U$ values (for an oxide, Mn gets
+        \code{LDAUU} $= 3.9$\,eV, O gets $0$).
+  \item \code{KPOINTS}: automatic mesh by reciprocal density,
+        \code{reciprocal\_density = 64} (and \code{= 200} for metals).
+  \item \code{POTCAR}: functional \code{PBE\_54} plus a table of per-element
+        pseudopotential labels (e.g.\ \code{Mn}$\to$\code{Mn\_pv},
+        \code{Fe}$\to$\code{Fe}, \code{V}$\to$\code{V\_sv}); elements not listed
+        use the pymatgen default label.
+\end{itemize}
+
+\subsection{Layer 2 --- per-job \texttt{incar\_updates}}
+
+Each set generator adds a small dictionary of overrides appropriate to the job
+type (\code{atomate2/vasp/sets/core.py}):
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+Generator & Purpose & \code{incar\_updates} \\
+\midrule
+\code{RelaxSetGenerator}  & relaxation & \code{NSW=99, IBRION=2, ISIF=3, LCHARG=False} \\
+\code{StaticSetGenerator} & static     & \code{NSW=0, ISMEAR=-5, LORBIT=11, LCHARG=True, LREAL=False} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Layer 3 --- automatic options and the structure}
+
+\code{pymatgen}'s \code{VaspInputSet.incar} then computes a few values from the
+structure itself:
+
+\begin{itemize}
+  \item \textbf{\code{MAGMOM}} --- one entry per site, taken directly from the
+        ordered structure's per-site moments (Section~3). This is how the FM/AFM
+        pattern enters the calculation.
+  \item \textbf{\code{ISPIN}} --- set to \code{2} automatically because the
+        structure is magnetic (\code{auto\_ispin}).
+  \item \textbf{\code{ISMEAR}/\code{SIGMA}} --- \code{auto\_ismear} picks safe
+        smearing from the (unknown) band gap; for the static step this is then
+        overridden to \code{ISMEAR = -5} by Layer~2.
+  \item \textbf{\code{LDAUU/LDAUL/LDAUJ}} --- expanded into per-species lists in
+        the site order of the \code{POSCAR}.
+\end{itemize}
+
+\subsection{Precedence}
+
+When the final \code{INCAR} is assembled the layers are applied so that, for any
+given tag, the winner is (highest first):
+
+\[
+\underbrace{\texttt{user\_incar\_settings}}_{\text{e.g. EDIFF}=10^{-7}}
+\;>\;
+\underbrace{\texttt{incar\_updates}}_{\text{per-job (Layer 2)}}
+\;>\;
+\underbrace{\texttt{auto\_updates}}_{\text{ISPIN, ISMEAR, \dots}}
+\;>\;
+\underbrace{\texttt{base config}}_{\text{Layer 1}} .
+\]
+
+\code{MAGMOM} and the \code{LDAU*} lists are computed from the structure plus the
+config and are not overwritten by the later steps. Finally, because a
+\code{KPOINTS} file is present, \code{KSPACING} is stripped from the
+\code{INCAR}, and unused tags are pruned.
+
+\subsection{The other three files}
+
+\begin{description}
+  \item[\code{POSCAR}] the ordered (and, for the static step, relaxed)
+        \code{Structure} passed into \code{make()}.
+  \item[\code{KPOINTS}] a $\Gamma$-centred automatic mesh generated from
+        \code{reciprocal\_density = 64} for the given lattice (for MnO: a
+        $4\times4\times4$ grid).
+  \item[\code{POTCAR}] selected by mapping each species through the per-element
+        label table and the \code{PBE\_54} functional; the actual potential
+        files are read from \code{\$PMG\_VASP\_PSP\_DIR}.
+\end{description}
+
+\section{Worked example: static input for an AFM MnO ordering}
+
+For one of the AFM orderings of MnO, \code{StaticSetGenerator(user\_incar\_settings=\{"EDIFF":\,1e-7\})}
+produces:
+
+\begin{lstlisting}[style=incar]
+ALGO = Fast        EDIFF = 1e-07      ENCUT = 680.0      GGA = Ps
+ISMEAR = -5        SIGMA = 0.2        ISPIN = 2          NSW = 0
+LDAU = True        LDAUTYPE = 2       LDAUL = 2 0        LDAUU = 3.9 0
+LDAUJ = 0 0        LMAXMIX = 4        LORBIT = 11        LREAL = False
+LCHARG = True      LAECHG = True      LASPH = True       PREC = Accurate
+NELM = 200         MAGMOM = 1*5.0 1*-5.0 2*0.6
+\end{lstlisting}
+
+\noindent Reading it back against the layers: \code{EDIFF = 1e-07} is the project
+override (Layer~3 user setting); \code{ISMEAR = -5}, \code{NSW = 0},
+\code{LORBIT = 11}, \code{LCHARG = True} come from \code{StaticSetGenerator}
+(Layer~2); \code{GGA = Ps}, \code{ENCUT = 680}, \code{LDAU = True},
+\code{LDAUU = 3.9\,0} come from the \code{atomate2} base config (Layer~1);
+\code{ISPIN = 2} and \code{MAGMOM} (one Mn up, one Mn down, two O nearly zero)
+are derived from the magnetic ordering. The matching \code{KPOINTS} is a
+$\Gamma$-centred $4\times4\times4$ mesh.
+
+\section{Runtime environment}
+
+The numeric INCAR/KPOINTS content above is independent of the cluster, but two
+runtime ingredients are supplied by the \code{jobflow-remote} worker
+\code{pre\_run} block (\code{.jfremote/dft\_pipeline2.yaml}) and matter for
+reproducibility:
+
+\begin{itemize}
+  \item \code{PMG\_VASP\_PSP\_DIR} points at a local pseudopotential tree
+        (\code{.vasp\_psp\_compat}) and \code{PMG\_DEFAULT\_FUNCTIONAL = PBE},
+        which together resolve the \code{POTCAR} files.
+  \item \code{ATOMATE2\_VASP\_CMD = "vasp"} (and the $\Gamma$-only variant) plus
+        the loaded \code{chem/vasp/6.4.3} module provide the executable that
+        \code{run\_vasp} invokes.
+\end{itemize}
+
+\section{Summary}
+
+The DFT inputs are fully determined by: (1) the magnetic
+\emph{ordering} written into the \code{POSCAR}/\code{MAGMOM} by
+\code{MagneticStructureEnumerator}; (2) the \code{atomate2} GGA{+}U base set
+(PBEsol, \code{LDAU} on); (3) per-job overrides distinguishing relaxation
+(\code{ISIF=3}, \code{NSW=99}) from static (\code{ISMEAR=-5}, \code{NSW=0}); and
+(4) the single project tweak \code{EDIFF}~$=10^{-7}$ on the static step. No input
+file is templated by hand --- every value is produced by the generator chain
+\code{*Maker} $\to$ \code{*SetGenerator} $\to$ \code{pymatgen.VaspInputSet}.
+
+\end{document}
