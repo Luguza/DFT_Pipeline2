@@ -17,3 +17,4 @@ wheels/
 jfr_work/
 
 *.pdf
+.vscode/
