@@ -14,7 +14,10 @@ wheels/
 
 # FastHTML session signing key (secret — do not commit)
 .sesskey
-jfr_work/
 
 *.pdf
 .vscode/
+
+# Job Flow Results
+jfr_work/
+results/

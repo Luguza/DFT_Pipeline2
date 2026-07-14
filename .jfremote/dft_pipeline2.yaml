@@ -49,7 +49,7 @@ workers:
       account: bw16c005
       nodes: 1
       ntasks_per_node: 1
-      time: "01:00:00"
+      time: "00:30:00"
     pre_run: |
       module purge
       module load chem/vasp/6.4.3
@@ -62,7 +62,20 @@ workers:
       export OMP_NUM_THREADS=1
       export MKL_NUM_THREADS=1
       source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
-  
+
+  exchange_local:
+    type: local
+    scheduler_type: shell
+    work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work
+    pre_run: |
+      module purge
+      export PATH="/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/vampire:$PATH"
+      export PMG_VASP_PSP_DIR=/lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.vasp_psp_compat
+      export PMG_DEFAULT_FUNCTIONAL=PBE
+      export OMP_NUM_THREADS=1
+      export MKL_NUM_THREADS=1
+      source /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/.venv/bin/activate
+
 
 queue:
   store:
