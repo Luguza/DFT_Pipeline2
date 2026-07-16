@@ -23,7 +23,7 @@ workers:
     work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work
     resources:
       partition: standard
-      account: bw16c005
+      account: bw26b012
       nodes: 1
       ntasks_per_node: 24
       time: "03:00:00"
@@ -46,7 +46,7 @@ workers:
     work_dir: /lustre/work/ws/ws1/ka_qa7606-dft_pipeline/DFT_Pipeline2/jfr_work
     resources:
       partition: standard
-      account: bw16c005
+      account: bw26b012
       nodes: 1
       ntasks_per_node: 1
       time: "00:30:00"

@@ -4,11 +4,28 @@ from jobflow_remote import submit_flow
 from mp_api.client import MPRester
 
 from atomate2.common.flows.magnetism import MagneticOrderingsMaker
+from atomate2.vasp.jobs.core import RelaxMaker, StaticMaker
+from atomate2.vasp.sets.core import RelaxSetGenerator, StaticSetGenerator
 
 
 if __name__ == "__main__":
-    # rock-salt MnO (Fm-3m) from Materials Project as the magnetic parent
     with MPRester() as mpr:
         structure = mpr.get_structure_by_material_id("mp-19306")
-    flow = MagneticOrderingsMaker(name="Fe3O4").make(structure)
+
+    static_maker = StaticMaker(
+        input_set_generator=StaticSetGenerator(
+            user_incar_settings={"EDIFF": 1e-6, "NELM": 300, "ALGO": "Normal"}
+        )
+    )
+    relax_maker = RelaxMaker(
+        input_set_generator=RelaxSetGenerator(
+            user_incar_settings={"NELM": 300, "ALGO": "Normal"}
+        )
+    )
+
+    flow = MagneticOrderingsMaker(
+        name="Fe3O4",
+        static_maker=static_maker,
+        relax_maker=relax_maker,
+    ).make(structure)
     submit_flow(flow, worker="magnetism_justus2", project="dft_pipeline2")
