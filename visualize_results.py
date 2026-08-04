@@ -25,8 +25,10 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from jobflow_remote import JobController
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.lines import Line2D
+from matplotlib.patches import FancyArrowPatch, Patch
 from monty.json import MontyDecoder
+from pymatgen.analysis.magnetism.analyzer import CollinearMagneticStructureAnalyzer
 
 PROJECT = "dft_pipeline2"
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
@@ -43,6 +45,14 @@ SERIES_COLORS = [
 ]
 INK_MUTED = "#898781"
 GRIDLINE = "#e1e0d9"
+
+# Magnetic ordering type -> colour. Fixed assignment, never cycled, so a given
+# type keeps its colour across materials and across runs with different type mixes.
+ORDERING_COLORS = {
+    "FM": SERIES_COLORS[0],  # blue
+    "AFM": SERIES_COLORS[7],  # orange
+    "FiM": SERIES_COLORS[1],  # aqua
+}
 
 
 def load_exchange_doc(db_id: str) -> dict:
@@ -76,18 +86,22 @@ def material_moments(doc: dict) -> dict[int, tuple[str, str, float]]:
     ``VampireCaller._create_mat``: one material per (sublattice, spin sign)
     group, with the moment taken as ``|magmom|`` of a representative site.
 
+    Like the caller, this reads the ground state ``magnetic_structures[0]``
+    (magnetic ions only), which is what ``sublattice_ids`` is indexed against -
+    ``structures`` retains the nonmagnetic ions and does not line up.
+
     Returns ``{material_id: (element, "up"|"down", M_sat_in_muB)}``.
     """
     hm = doc.get("heisenberg_model")
     if not hm:
         return {}
-    structure = MontyDecoder().process_decoded(hm["structures"][0])
-    site_labels = hm["site_labels"][0]
+    structure = MontyDecoder().process_decoded(hm["magnetic_structures"][0])
+    sublattice_ids = hm["sublattice_ids"][0]
     magmoms = structure.site_properties["magmom"]
 
     reps: dict[int, int] = {}  # material id (1-indexed) -> representative site
     mat_ids: dict[tuple[int, bool], int] = {}
-    for site, (sub_id, magmom) in enumerate(zip(site_labels, magmoms, strict=True)):
+    for site, (sub_id, magmom) in enumerate(zip(sublattice_ids, magmoms, strict=True)):
         group = (sub_id, magmom > 0)
         mat_ids.setdefault(group, len(mat_ids) + 1)
         reps.setdefault(mat_ids[group], site)
@@ -154,13 +168,64 @@ def plot_magnetization(doc: dict, outdir: Path, save_df=False) -> None:
     plt.close(fig)
     print(f"Wrote {out}")
 
-def plot_exchange_graph(doc: dict, outdir: Path) -> None:
-    """Draw the interaction graph: unique magnetic sites joined by J couplings.
 
-    Nodes are the symmetry-distinct magnetic sites of the ground-state
-    interaction graph (``HeisenbergModel.igraph``); edges are the fitted
-    exchange constants, one per neighbour shell (nn, nnn, ...), annotated with
-    ``J`` (meV) and the bond distance. Intra-site couplings are self-loops.
+def plot_susceptibility(doc: dict, outdir: Path) -> None:
+    """Plot the Vampire susceptibility curves; the peak of chi marks T_c.
+
+    Mirrors ``plot_magnetization``: the mean susceptibility X_m is the bold
+    curve and X_x/X_y/X_z its spatial components. The critical temperature is
+    defined as the temperature of the X_m maximum, so the T_c line falls on the
+    peak by construction.
+    """
+    if not doc.get("vampire_output"):
+        print("Exchange doc has no vampire output; skipping susceptibility plot.")
+        return
+
+    vout = MontyDecoder().process_decoded(doc["vampire_output"])
+    df = pd.read_json(StringIO(vout.parsed_out))
+    tc = vout.critical_temp
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(df["T"], df["X_m"], color=SERIES_COLORS[0], lw=2, label="mean")
+    for i, comp in enumerate("xyz"):
+        ax.plot(
+            df["T"],
+            df[f"X_{comp}"],
+            color=SERIES_COLORS[(i + 1) % len(SERIES_COLORS)],
+            lw=2,
+            alpha=0.5,
+            label=rf"$\chi_{comp}$",
+        )
+    ax.axvline(tc, color=INK_MUTED, ls="--", lw=1.5, label=f"$T_c$ = {tc:.0f} K")
+
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel(r"Susceptibility $\chi$")
+    ax.set_title(f"{doc.get('formula_pretty', '')} Vampire Monte Carlo".strip())
+    ax.grid(color=GRIDLINE, lw=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+
+    out = outdir / "susceptibility.png"
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    print(f"Wrote {out}")
+
+
+def plot_exchange_graph(doc: dict, outdir: Path) -> None:
+    """Draw the interaction graph: magnetic sites joined by J couplings.
+
+    Nodes are the magnetic sites of the ground-state interaction graph
+    (``HeisenbergModel.igraph``), coloured by spin direction and labelled with
+    element, sublattice index and the site moment in muB.
+
+    Edges carry the graph's own weights, which are what VAMPIRE integrates:
+    ``J_ij |m_i m_j|`` in meV for the normalized-spin Hamiltonian, so the same
+    fitted coupling gives different numbers on bonds between different moments.
+    Each edge is annotated with that meV value and coloured by its coupling key
+    ``{a}-{b}-{shell}`` (sublattice pair + neighbour shell); the legend maps the
+    colour back to the moment-independent fit parameter in meV/muB^2 and the
+    bond distance. Intra-site couplings are self-loops.
     """
     hm = doc.get("heisenberg_model")
     if not hm:
@@ -171,82 +236,119 @@ def plot_exchange_graph(doc: dict, outdir: Path) -> None:
     graph = ig.graph
     structure = ig.structure
     magmoms = structure.site_properties["magmom"]
+    sublattice_ids = hm.get("sublattice_ids", [[]])[0]  # node index -> sublattice id
 
-    # Map each fitted J value back to its shell name (nn/nnn/...) and distance.
+    # Map each fitted J value back to its coupling key "{a}-{b}-{shell}" and to
+    # the (J, distance) shown in the legend. Colour is assigned per key.
+    # ``dists`` is keyed by the same coupling key, so couplings sort by distance;
+    # keys without one (the averaged "<J>") go last.
     dists = hm.get("dists", {})
-    weight_to_shell: dict[float, tuple[str, float | None]] = {}
-    for key, j in hm.get("ex_params", {}).items():
-        if key == "E0":
-            continue
-        shell = key.split("-")[-1]
-        weight_to_shell[round(j, 8)] = (shell, dists.get(shell))
-    shell_order = list(dists) or ["nn", "nnn", "nnnn"]
+    ex_params = {k: v for k, v in hm.get("ex_params", {}).items() if k != "E0"}
+    keys = sorted(ex_params, key=lambda k: (dists.get(k, float("inf")), k))
+    key_info = {k: (ex_params[k], dists.get(k)) for k in keys}
+    key_colors = {
+        k: SERIES_COLORS[(i + 1) % len(SERIES_COLORS)] for i, k in enumerate(keys)
+    }
 
-    # Collapse the many periodic-image edges into one per (site pair, shell).
-    seen: set[tuple[int, int, float]] = set()
-    edges: list[tuple[int, int, float, str, float | None]] = []
+    def coupling_key(u: int, v: int, weight: float) -> str:
+        """Identify which fitted parameter an edge weight came from.
+
+        ``get_interaction_graph`` folds the site moments into the weight, so
+        dividing them back out recovers the meV/muB^2 fit parameter to match
+        against - comparing the weight itself never matches anything.
+        """
+        j = weight / abs(magmoms[u] * magmoms[v])
+        key = min(keys, key=lambda k: abs(ex_params[k] - j), default="?")
+        return key if key in ex_params and abs(ex_params[key] - j) < 1e-6 else "?"
+
+    # Collapse the many periodic-image edges into one per (site pair, coupling).
+    seen: set[tuple[int, int, str]] = set()
+    edges: list[tuple[int, int, str, float]] = []
     for u, v, data in graph.edges(data=True):
-        j = round(data["weight"], 8)
-        dedup = (min(u, v), max(u, v), j)
+        key = coupling_key(u, v, data["weight"])
+        dedup = (min(u, v), max(u, v), key)
         if dedup in seen:
             continue
         seen.add(dedup)
-        shell, dist = weight_to_shell.get(j, ("?", None))
-        edges.append((u, v, j, shell, dist))
+        edges.append((u, v, key, data["weight"]))
 
     nodes = list(graph.nodes())
     pos = nx.circular_layout(nodes) if len(nodes) > 1 else {nodes[0]: np.zeros(2)}
     pos = {n: np.asarray(p, dtype=float) for n, p in pos.items()}
     centroid = np.mean(list(pos.values()), axis=0)
 
-    shell_colors = {
-        sh: SERIES_COLORS[(i + 1) % len(SERIES_COLORS)]
-        for i, sh in enumerate(shell_order)
-    }
+    fig, ax = plt.subplots(figsize=(7, 5.5))
 
-    fig, ax = plt.subplots(figsize=(8, 4))
+    def edge_label(xy: np.ndarray, weight: float, color: str) -> None:
+        ax.annotate(f"{weight:+.1f}", xy, color=color, ha="center", va="center",
+                    fontsize=7.5, fontweight="bold", zorder=5,
+                    bbox={"boxstyle": "round,pad=0.15", "fc": "white",
+                          "ec": "none", "alpha": 0.85})
 
-    # Nodes: coloured by spin direction, labelled with element + arrow.
-    for n in nodes:
-        up = magmoms[n] > 0
-        ax.scatter(*pos[n], s=1600, zorder=3,
-                   color=SERIES_COLORS[0] if up else SERIES_COLORS[5],
-                   edgecolors="white", linewidths=2)
-        arrow = r"$\uparrow$" if up else r"$\downarrow$"
-        ax.annotate(f"{structure[n].specie.symbol}{arrow}", pos[n],
-                    color="white", ha="center", va="center",
-                    fontsize=13, fontweight="bold", zorder=4)
-
-    # Edges: fan out parallel shells between a pair; self-loops for intra-site.
+    # Edges: every inter-site edge is bowed by the same base ``RAD`` so that
+    # edges through the centre of the ring do not overlap their own labels;
+    # parallel couplings between one pair fan out around it.
+    RAD = 0.16
     inter = [e for e in edges if e[0] != e[1]]
-    for pair in {(min(u, v), max(u, v)) for u, v, *_ in inter}:
-        group = [e for e in inter if (min(e[0], e[1]), max(e[0], e[1])) == pair]
-        group.sort(key=lambda e: shell_order.index(e[3]) if e[3] in shell_order else 99)
+    for node_pair in {(min(u, v), max(u, v)) for u, v, _, _ in inter}:
+        group = [e for e in inter if (min(e[0], e[1]), max(e[0], e[1])) == node_pair]
+        group.sort(key=lambda e: keys.index(e[2]) if e[2] in keys else 99)
         m = len(group)
-        for k, (u, v, j, shell, dist) in enumerate(group):
-            rad = 0.35 * (k - (m - 1) / 2)
-            a, b = pos[u], pos[v]
+        for k, (_u, _v, key, weight) in enumerate(group):
+            # Draw low index -> high index so the bow direction is consistent.
+            u, v = node_pair
+            rad = RAD + 0.35 * (k - (m - 1) / 2)
+            color = key_colors.get(key, INK_MUTED)
             ax.add_patch(FancyArrowPatch(
-                a, b, connectionstyle=f"arc3,rad={rad}", arrowstyle="-",
-                color=shell_colors.get(shell, INK_MUTED), lw=2.5,
-                shrinkA=22, shrinkB=22, zorder=2,
+                pos[u], pos[v], connectionstyle=f"arc3,rad={rad}", arrowstyle="-",
+                color=color, lw=2.5, shrinkA=30, shrinkB=30, zorder=2,
             ))
-            mid = (a + b) / 2
-            perp = np.array([b[1] - a[1], a[0] - b[0]])
-            lbl = mid + 0.5 * rad * perp
-            _edge_label(ax, lbl, shell, j, dist, shell_colors.get(shell, INK_MUTED))
+            # Midpoint of the arc3 quadratic Bezier: the chord midpoint pushed
+            # perpendicular by half the control-point offset matplotlib uses.
+            delta = pos[v] - pos[u]
+            mid = (pos[u] + pos[v]) / 2 + 0.5 * rad * np.array([delta[1], -delta[0]])
+            edge_label(mid, weight, color)
 
-    for k, (u, _v, j, shell, dist) in enumerate(e for e in edges if e[0] == e[1]):
+    for k, (u, _v, key, weight) in enumerate(e for e in edges if e[0] == e[1]):
         direction = pos[u] - centroid
         if np.linalg.norm(direction) < 1e-9:
             direction = np.array([np.cos(k), np.sin(k)])
         direction = direction / np.linalg.norm(direction)
         r = 0.22
         loop = pos[u] + direction * r
-        ax.add_patch(plt.Circle(loop, r, fill=False, zorder=2, lw=2.5,
-                                color=shell_colors.get(shell, INK_MUTED)))
-        _edge_label(ax, pos[u] + direction * (2 * r + 0.12), shell, j, dist,
-                    shell_colors.get(shell, INK_MUTED))
+        color = key_colors.get(key, INK_MUTED)
+        ax.add_patch(plt.Circle(loop, r, fill=False, zorder=2, lw=2.5, color=color))
+        edge_label(loop + direction * r, weight, color)
+
+    # Nodes: coloured by spin, labelled with element, sublattice index and the
+    # site moment whose magnitude scales every edge weight touching the node.
+    for n in nodes:
+        up = magmoms[n] > 0
+        ax.scatter(*pos[n], s=3200, zorder=3,
+                   color=SERIES_COLORS[0] if up else SERIES_COLORS[5],
+                   edgecolors="white", linewidths=2)
+        sub = sublattice_ids[n] if n < len(sublattice_ids) else "?"
+        ax.annotate(rf"$\mathrm{{{structure[n].specie.symbol}}}_{{{sub}}}$"
+                    "\n"
+                    rf"${magmoms[n]:+.2f}\,\mu_B$",
+                    pos[n], color="white", ha="center", va="center",
+                    fontsize=9, fontweight="bold", zorder=4, linespacing=1.4)
+
+    # Legend: one coloured line per coupling, keyed by "{a}-{b}-{shell}", giving
+    # the moment-independent fit parameter behind the meV numbers on the edges.
+    handles = []
+    for key in keys:
+        j, dist = key_info[key]
+        label = f"$J_\\mathrm{{{key}}}$ = {j:.3f} meV/$\\mu_B^2$"
+        if dist is not None:
+            label += f",  $d$ = {dist:.2f} $\\AA$"
+        handles.append(Line2D([0], [0], color=key_colors[key], lw=2.5, label=label))
+    if handles:
+        ax.legend(handles=handles, frameon=False, loc="upper center",
+                  bbox_to_anchor=(0.5, 0.0), ncol=1, fontsize=9,
+                  handlelength=1.6, borderaxespad=0.0,
+                  title=r"edge labels: $J_{ij}\,|m_i m_j|$ in meV (VAMPIRE ucf)",
+                  title_fontsize=8)
 
     ax.set_title(f"{doc.get('formula_pretty', '')} exchange couplings".strip(), pad=2)
     ax.set_aspect("equal")
@@ -255,19 +357,96 @@ def plot_exchange_graph(doc: dict, outdir: Path) -> None:
     fig.tight_layout()
 
     out = outdir / "exchange_graph.png"
-    fig.savefig(out, dpi=300)
+    fig.savefig(out, dpi=300, bbox_inches="tight")
     plt.close(fig)
     print(f"Wrote {out}")
 
 
-def _edge_label(ax, xy, shell, j, dist, color) -> None:
-    """Annotate an exchange edge with its shell, J (meV) and bond distance."""
-    text = f"$J_\\mathrm{{{shell}}}$ = {j:.3f} meV"
-    if dist is not None:
-        text += f"\n$d$ = {dist:.2f} $\\AA$"
-    ax.annotate(text, xy, color=color, ha="center", va="center", fontsize=8,
-                zorder=5, bbox=dict(boxstyle="round,pad=0.25", fc="white",
-                                    ec=color, lw=1.0, alpha=0.9))
+def plot_ordering_energies(doc: dict, outdir: Path) -> None:
+    """Bar plot of the DFT energy of every ordering, coloured by ordering type.
+
+    These are the energies the Heisenberg fit was built on, per magnetic ion and
+    measured from the ground state, so the bars share a true zero baseline (the
+    absolute values sit around -16.5 eV and would need a truncated axis).
+
+    The type (FM / AFM / FiM) is classified by pymatgen's
+    ``CollinearMagneticStructureAnalyzer`` from ``magnetic_structures``, which
+    holds the magnetic ions only - induced moments on the nonmagnetic sites
+    therefore cannot tip the classification. Bars are sorted by energy; the tick
+    keeps the original index, which is what the ``ex_mat`` rows refer to.
+    """
+    hm = doc.get("heisenberg_model")
+    if not hm:
+        print("Exchange doc has no heisenberg model; skipping ordering energies.")
+        return
+
+    decoder = MontyDecoder()
+    energies = hm["energies"]
+    types = [
+        CollinearMagneticStructureAnalyzer(
+            decoder.process_decoded(s), make_primitive=False
+        ).ordering.value
+        for s in hm["magnetic_structures"]
+    ]
+
+    order = sorted(range(len(energies)), key=lambda i: energies[i])
+    de = [(energies[i] - energies[order[0]]) * 1000 for i in order]  # meV per ion
+    colors = [ORDERING_COLORS.get(types[i], INK_MUTED) for i in order]
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    x = np.arange(len(order))
+    ax.bar(x, de, width=0.72, color=colors, zorder=2)
+
+    # Type chip under every bar. The ground state sits at the zero baseline, so
+    # its bar has no height to carry a colour; the chip row shows its type (and
+    # every other one) independently of bar height.
+    ax.scatter(
+        x,
+        [-0.028] * len(x),
+        marker="s",
+        s=42,
+        color=colors,
+        transform=ax.get_xaxis_transform(),
+        clip_on=False,
+        zorder=3,
+    )
+    ax.tick_params(axis="x", length=0, pad=14)
+
+    # Value on every cap: identity is never colour-alone, and aqua sits below
+    # 3:1 against the page, so the labels double as the required relief.
+    for xi, d in zip(x, de, strict=True):
+        ax.annotate(
+            f"{d:.0f}",
+            (xi, d),
+            textcoords="offset points",
+            xytext=(0, 3),
+            ha="center",
+            va="bottom",
+            fontsize=8,
+            color=INK_MUTED,
+        )
+
+    present = [t for t in ORDERING_COLORS if t in set(types)]
+    handles = [Patch(facecolor=ORDERING_COLORS[t], label=t) for t in present]
+    if any(t not in ORDERING_COLORS for t in types):
+        handles.append(Patch(facecolor=INK_MUTED, label="other"))
+
+    ax.set_xticks(x)
+    ax.set_xticklabels([str(i) for i in order])
+    ax.set_xlabel("Ordering index")
+    ax.set_ylabel(r"$E - E_\mathrm{gs}$ (meV / magnetic ion)")
+    ax.set_title(f"{doc.get('formula_pretty', '')} magnetic ordering energies".strip())
+    ax.margins(y=0.12)  # headroom for the cap labels
+    ax.set_axisbelow(True)
+    ax.grid(axis="y", color=GRIDLINE, lw=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(handles=handles, frameon=False)
+    fig.tight_layout()
+
+    out = outdir / "ordering_energies.png"
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    print(f"Wrote {out}")
 
 
 def write_exchange_doc(doc: dict, outdir: Path) -> None:
@@ -284,11 +463,13 @@ def main() -> None:
     args = parser.parse_args()
 
     doc, flow_ids = load_exchange_doc(args.db_id)
-    outdir = RESULTS_DIR / flow_ids[-1]
+    outdir = RESULTS_DIR / min(flow_ids)
     outdir.mkdir(parents=True, exist_ok=True)
 
     plot_magnetization(doc, outdir, save_df=True)
+    plot_susceptibility(doc, outdir)
     plot_exchange_graph(doc, outdir)
+    plot_ordering_energies(doc, outdir)
     write_exchange_doc(doc, outdir)
 
 
