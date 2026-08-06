@@ -11,6 +11,7 @@ from atomate2.vasp.sets.core import RelaxSetGenerator, StaticSetGenerator
 if __name__ == "__main__":
     with MPRester() as mpr:
         structure = mpr.get_structure_by_material_id("mp-19306")
+    structure.remove_site_property("magmom") 
 
     static_maker = StaticMaker(
         input_set_generator=StaticSetGenerator(
