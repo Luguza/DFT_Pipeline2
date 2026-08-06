@@ -1,9 +1,10 @@
 """Visualize the results of an exchange workflow.
 
-Usage: python visualize_results.py <db_id>
+Usage: python visualize_results.py [-id <db_id>]
 
 ``db_id`` is the jobflow-remote db_id of any job in the exchange flow (as shown
-by ``jf job list``). Plots are written to ``results/<db_id>/``.
+by ``jf job list``); if omitted, the most recently completed exchange flow is
+used. Plots are written to ``results/<db_id>/``.
 
 Each ``plot_*`` function produces one figure and is independent of the others,
 so they can later be toggled individually via CLI flags.
@@ -25,6 +26,7 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from jobflow_remote import JobController
+from jobflow_remote.jobs.state import FlowState
 from matplotlib.lines import Line2D
 from matplotlib.patches import FancyArrowPatch, Patch
 from monty.json import MontyDecoder
@@ -55,18 +57,36 @@ ORDERING_COLORS = {
 }
 
 
-def load_exchange_doc(db_id: str) -> dict:
-    """Load the raw ExchangeDocument dict from the flow containing job ``db_id``."""
+EXCHANGE_JOB = "build exchange doc"
+
+def load_exchange_doc(db_id: str | None) -> dict:
+    """Load the raw ExchangeDocument dict from the flow containing job ``db_id``.
+
+    Without a ``db_id`` the most recently completed exchange flow is used, i.e.
+    the newest COMPLETED flow that contains a ``build exchange doc`` job.
+    """
     jc = JobController.from_project_name(PROJECT)
-    flows = jc.get_flows_info(db_ids=[db_id], with_jobs_info=True)
-    if not flows:
-        raise SystemExit(f"No flow contains a job with db_id {db_id}.")
-    flow = flows[0]
+    if db_id is None:
+        flows = jc.get_flows_info(
+            states=FlowState.COMPLETED, sort=[("updated_on", -1)], with_jobs_info=True
+        )
+        flow = next((f for f in flows if EXCHANGE_JOB in f.job_names), None)
+        if flow is None:
+            raise SystemExit(
+                f"No completed flow with a '{EXCHANGE_JOB}' job found in "
+                f"project {PROJECT}."
+            )
+        print(f"Using latest completed exchange flow: {flow.name} ({flow.flow_id})")
+    else:
+        flows = jc.get_flows_info(db_ids=[db_id], with_jobs_info=True)
+        if not flows:
+            raise SystemExit(f"No flow contains a job with db_id {db_id}.")
+        flow = flows[-1]
     try:
-        idx = flow.job_names.index("build exchange doc")
+        idx = flow.job_names.index(EXCHANGE_JOB)
     except ValueError:
         raise SystemExit(
-            f"Flow '{flow.name}' ({flow.flow_id}) has no 'build exchange doc' job "
+            f"Flow '{flow.name}' ({flow.flow_id}) has no '{EXCHANGE_JOB}' job "
             "- is this an exchange flow?"
         ) from None
     raw = jc.get_job_output(db_id=flow.db_ids[idx], load=True)
@@ -459,7 +479,12 @@ def write_exchange_doc(doc: dict, outdir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("db_id", help="db_id of any job in the exchange flow")
+    parser.add_argument(
+        "-id", 
+        "--db_id", 
+        default=None, 
+        help="db_id of any job in the exchange flow "
+             "(default: latest completed exchange flow)")
     args = parser.parse_args()
 
     doc, flow_ids = load_exchange_doc(args.db_id)
