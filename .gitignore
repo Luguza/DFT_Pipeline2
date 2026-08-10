@@ -21,3 +21,7 @@ wheels/
 # Job Flow Results
 jfr_work/
 results/
+
+tb2j/tb2j_fe3o4/
+tb2j/*.out
+tb2j/*.err

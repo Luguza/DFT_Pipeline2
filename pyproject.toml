@@ -15,6 +15,7 @@ dependencies = [
     "pytest>=9.0.3",
     "python-fasthtml<0.13",
     "starlette<0.40",
+    "tb2j>=0.9.18",
 ]
 
 [tool.uv.sources]
