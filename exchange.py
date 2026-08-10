@@ -62,6 +62,7 @@ def latest_ordering_doc():
 def calc_exchange(ordering_doc):
     """Build the exchange flow from a completed magnetic-orderings document."""
     heisenberg_settings = {
+        'cutoff': 5.0,
     }
     mc_settings = {
         'mc_box_size': 5.0,
