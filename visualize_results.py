@@ -57,6 +57,19 @@ ORDERING_COLORS = {
 }
 
 
+# Curie-Weiss fit window (see ``curie_weiss_fit``): the lowest temperature the
+# window may reach, in units of T_c; the top fraction of the allowed range taken
+# as certainly linear; how many standard errors the leading edge of the window
+# may drift off the line before it stops widening; how many candidates in a row
+# must fail that test to stop the widening; and the number of points the edge
+# test averages over, which is also the shortest window worth fitting.
+CW_TC_FLOOR = 1.5
+CW_ANCHOR_FRAC = 0.25
+CW_NOISE_TOL = 2.0
+CW_STOP_RUN = 3
+CW_MIN_POINTS = 8
+
+
 EXCHANGE_JOB = "build exchange doc"
 
 def load_exchange_doc(db_id: str | None) -> dict:
@@ -227,6 +240,169 @@ def plot_susceptibility(doc: dict, outdir: Path) -> None:
     fig.tight_layout()
 
     out = outdir / "susceptibility.png"
+    fig.savefig(out, dpi=300)
+    plt.close(fig)
+    print(f"Wrote {out}")
+
+
+def curie_weiss_fit(t: np.ndarray, inv_chi: np.ndarray, tc: float) -> dict | None:
+    """Fit 1/chi = a (T - theta) over the widest window that is still linear.
+
+    The window always ends at the highest temperature sampled and grows
+    downwards; the search never reaches below ``CW_TC_FLOOR * T_c``, because
+    the critical region bends 1/chi over long before T_c itself and a window
+    that dips into it drags the intercept towards the Monte Carlo T_c - which
+    would make the mean-field estimate agree with it for the wrong reason.
+
+    "Still linear" is judged against the run's own noise: the topmost
+    ``CW_ANCHOR_FRAC`` of the allowed points is taken as certainly linear and
+    its residual scatter is the reference sigma. The start is then walked down
+    point by point, and each candidate is judged on the *mean* residual of the
+    lowest ``CW_MIN_POINTS`` points in the window, accepted while that stays
+    within ``CW_NOISE_TOL`` standard errors of zero. Testing the leading edge
+    rather than the scatter of the whole window is what makes the cut sharp:
+    a bend that has only reached the bottom few points is diluted to nothing in
+    a residual RMS taken over a hundred, but it biases those points one way, so
+    averaging them (noise falls as 1/sqrt(n), bias does not) sees it.
+
+    It takes ``CW_STOP_RUN`` rejections in a row to stop the walk, and the
+    window keeps the last accepted start, so it stays contiguous with the tail.
+    Requiring a run is what separates noise from curvature: a lone point can
+    scatter past the threshold anywhere in the linear region and would otherwise
+    cut the window far above the real bend, while curvature only grows once it
+    starts, so it fails every candidate from there down.
+
+    Returns ``None`` when too few points sit above the floor to fit, otherwise
+    ``{"t_start", "slope", "intercept", "theta", "n", "sigma"}`` with ``theta``
+    the x-intercept, i.e. the mean-field T_C.
+    """
+    order = np.argsort(t)
+    t, inv_chi = t[order], inv_chi[order]
+
+    def fit(start: int) -> tuple[float, float, float, float]:
+        """Line over ``t[start:]``: slope, intercept, scatter, edge bias.
+
+        The edge bias is the mean residual of the lowest ``CW_MIN_POINTS``
+        points, i.e. the end of the window where curvature creeps in first.
+        """
+        slope, intercept = np.polyfit(t[start:], inv_chi[start:], 1)
+        resid = inv_chi[start:] - (slope * t[start:] + intercept)
+        dof = max(len(resid) - 2, 1)
+        sigma = float(np.sqrt(np.sum(resid**2) / dof))
+        return slope, intercept, sigma, float(np.mean(resid[:CW_MIN_POINTS]))
+
+    (above,) = np.nonzero(t >= CW_TC_FLOOR * tc)
+    if len(above) < 2 * CW_MIN_POINTS:
+        return None
+    first = int(above[0])
+
+    # Anchor: the top slice of the allowed range, never shorter than the minimum
+    # window, fitted on its own to measure the scatter of pure linear data.
+    anchor = min(
+        len(t) - int(round(CW_ANCHOR_FRAC * len(above))), len(t) - CW_MIN_POINTS
+    )
+    sigma_ref = fit(anchor)[2]
+    max_bias = CW_NOISE_TOL * sigma_ref / np.sqrt(CW_MIN_POINTS)
+
+    best = anchor
+    failures = 0
+    for start in range(anchor - 1, first - 1, -1):
+        if abs(fit(start)[3]) > max_bias:
+            failures += 1
+            if failures >= CW_STOP_RUN:
+                break
+        else:
+            failures = 0
+            best = start
+
+    slope, intercept, sigma, _ = fit(best)
+    if slope <= 0:  # no paramagnetic tail to extrapolate along
+        return None
+    return {
+        "t_start": float(t[best]),
+        "slope": float(slope),
+        "intercept": float(intercept),
+        "theta": float(-intercept / slope),
+        "n": len(t) - best,
+        "sigma": sigma,
+    }
+
+
+def plot_inverse_susceptibility(doc: dict, outdir: Path) -> None:
+    """Plot 1/chi against temperature with the Curie-Weiss fit of its tail.
+
+    Only the mean susceptibility X_m is inverted: the spatial components of
+    ``plot_susceptibility`` are an order of magnitude noisier, and dividing by
+    them turns that noise into spikes that would set the y-scale. Non-positive
+    X_m values (none in practice, but a Monte Carlo run can produce them) are
+    dropped rather than inverted.
+
+    Above T_c the curve approaches the Curie-Weiss straight line
+    1/chi = a (T - theta) (see ``curie_weiss_fit`` for how the fit window is
+    chosen).
+    """
+    if not doc.get("vampire_output"):
+        print("Exchange doc has no vampire output; skipping inverse susceptibility.")
+        return
+
+    vout = MontyDecoder().process_decoded(doc["vampire_output"])
+    df = pd.read_json(StringIO(vout.parsed_out))
+    tc = vout.critical_temp
+
+    df = df[df["X_m"] > 0]
+    if df.empty:
+        print("No positive X_m values; skipping inverse susceptibility plot.")
+        return
+
+    t = df["T"].to_numpy(dtype=float)
+    inv_chi = 1.0 / df["X_m"].to_numpy(dtype=float)
+
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.plot(t, inv_chi, color=SERIES_COLORS[0], lw=2, label="mean")
+    ax.axvline(tc, color=INK_MUTED, ls="--", lw=1.5, label=f"$T_c$ = {tc:.0f} K")
+
+    cw = curie_weiss_fit(t, inv_chi, tc)
+    if cw is None:
+        print("Too few points above the critical region; no Curie-Weiss fit.")
+    else:
+        # Extrapolate from the intercept up through the fitted window, and shade
+        # the window itself so the extrapolated part is never mistaken for data.
+        line_t = np.array([cw["theta"], t.max()])
+        ax.plot(
+            line_t,
+            cw["slope"] * line_t + cw["intercept"],
+            color=SERIES_COLORS[5],
+            ls="--",
+            lw=1.5,
+            label=(
+                rf"Curie-Weiss fit ($T \geq$ {cw['t_start']:.0f} K)"
+                "\n"
+                rf"$\theta$ = {cw['theta']:.0f} K "
+            ),
+        )
+        ax.axvspan(cw["t_start"], t.max(), color=SERIES_COLORS[5], alpha=0.07, lw=0)
+        ax.scatter(cw["theta"], 0.0, color=SERIES_COLORS[5], s=30, zorder=4)
+        ax.set_ylim(bottom=0)
+        ax.set_xlim(left=min(0.0, cw["theta"]) - 0.02 * t.max())
+        print(
+            f"Curie-Weiss fit over T >= {cw['t_start']:.0f} K ({cw['n']} points): "
+            f"theta = {cw['theta']:.0f} K vs Monte Carlo T_c = {tc:.0f} K"
+        )
+        if cw["theta"] <= 0:
+            print(
+                "  theta < 0: the tail is a ferrimagnetic/antiferromagnetic "
+                "hyperbola, so this is the asymptotic theta, not T_C(MFT)."
+            )
+
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel(r"Inverse susceptibility $1/\chi$")
+    ax.set_title(f"{doc.get('formula_pretty', '')} Vampire Monte Carlo".strip())
+    ax.grid(color=GRIDLINE, lw=0.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+
+    out = outdir / "inverse_susceptibility.png"
     fig.savefig(out, dpi=300)
     plt.close(fig)
     print(f"Wrote {out}")
@@ -493,6 +669,7 @@ def main() -> None:
 
     plot_magnetization(doc, outdir, save_df=True)
     plot_susceptibility(doc, outdir)
+    plot_inverse_susceptibility(doc, outdir)
     plot_exchange_graph(doc, outdir)
     plot_ordering_energies(doc, outdir)
     write_exchange_doc(doc, outdir)
