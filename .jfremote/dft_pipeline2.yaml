@@ -83,7 +83,7 @@ workers:
 queue:
   store:
     type: MongoStore
-    host: 193.196.37.200
+    host: "[2001:7c0:2313:1:f816:3eff:fe98:9054]"
     port: 49170
     database: dft_pipeline2
     username: jfr_user
@@ -97,7 +97,7 @@ queue:
 jobstore:
   docs_store:
     type: MongoStore
-    host: 193.196.37.200
+    host: "[2001:7c0:2313:1:f816:3eff:fe98:9054]"
     port: 49170
     database: dft_pipeline2
     username: jfr_user
@@ -107,7 +107,7 @@ jobstore:
   additional_stores:
     data:
       type: GridFSStore
-      host: 193.196.37.200
+      host: "[2001:7c0:2313:1:f816:3eff:fe98:9054]"
       port: 49170
       database: dft_pipeline2
       username: jfr_user
