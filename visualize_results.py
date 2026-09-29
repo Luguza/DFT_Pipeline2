@@ -4,7 +4,7 @@ Usage: python visualize_results.py [-id <db_id>]
 
 ``db_id`` is the jobflow-remote db_id of any job in the exchange flow (as shown
 by ``jf job list``); if omitted, the most recently completed exchange flow is
-used. Plots are written to ``results/<db_id>/``.
+used. Plots are written to ``results/<db_id>_<formula_pretty>/``.
 
 Each ``plot_*`` function produces one figure and is independent of the others,
 so they can later be toggled individually via CLI flags.
@@ -664,7 +664,7 @@ def main() -> None:
     args = parser.parse_args()
 
     doc, flow_ids = load_exchange_doc(args.db_id)
-    outdir = RESULTS_DIR / min(flow_ids)
+    outdir = RESULTS_DIR / f"{min(flow_ids)}_{doc['formula_pretty']}"
     outdir.mkdir(parents=True, exist_ok=True)
 
     plot_magnetization(doc, outdir, save_df=True)
